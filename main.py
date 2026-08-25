@@ -91,8 +91,8 @@ async def chat_endpoint(request: Request, body: ChatRequest):
     payload = {
         "model": DEFAULT_MODEL,
         "messages": formatted_messages,
-        "temperature": 0.6,
-        "top_p": 0.9,
+        "temperature": 0.7,
+        "top_p": 0.95,
         "max_tokens": 4096,
         "stream": True
     }
@@ -104,10 +104,10 @@ async def chat_endpoint(request: Request, body: ChatRequest):
     }
 
     async def stream_generator():
-        client = httpx.AsyncClient(timeout=httpx.Timeout(90.0, connect=15.0))
+        client = httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0))
         try:
             async with client.stream("POST", NVIDIA_API_URL, json=payload, headers=headers) as response:
-                if response.status_code == 429 or response.status_code == 402:
+                if response.status_code in [402, 429]:
                     yield f"data: {json.dumps({'error_type': 'QUOTA_EXHAUSTED', 'text': '⚠️ Token quota exceeded on server. Please use your custom NVIDIA API key.'})}\n\n"
                     return
                 elif response.status_code != 200:
@@ -124,7 +124,9 @@ async def chat_endpoint(request: Request, body: ChatRequest):
                         try:
                             chunk = json.loads(data_str)
                             delta = chunk.get("choices", [{}])[0].get("delta", {})
-                            content = delta.get("content", "")
+                            
+                            # Instantly capture normal text or reasoning tokens without delay
+                            content = delta.get("content") or delta.get("reasoning_content") or ""
                             if content:
                                 yield f"data: {json.dumps({'text': content})}\n\n"
                         except Exception:
@@ -134,7 +136,15 @@ async def chat_endpoint(request: Request, body: ChatRequest):
         finally:
             await client.aclose()
 
-    return StreamingResponse(stream_generator(), media_type="text/event-stream")
+    return StreamingResponse(
+        stream_generator(), 
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
 
 # Mount Static Files
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
