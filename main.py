@@ -107,32 +107,46 @@ async def chat_endpoint(request: Request, body: ChatRequest):
         client = httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0))
         try:
             async with client.stream("POST", NVIDIA_API_URL, json=payload, headers=headers) as response:
-                if response.status_code in [402, 429]:
-                    yield f"data: {json.dumps({'error_type': 'QUOTA_EXHAUSTED', 'text': '⚠️ Token quota exceeded on server. Please use your custom NVIDIA API key.'})}\n\n"
+                if response.status_code == 401:
+                    yield f"data: {json.dumps({'error': 'Unauthorized (401): Invalid NVIDIA API Key. Please verify your API key in Settings.'})}\n\n"
+                    return
+                elif response.status_code in [402, 429]:
+                    yield f"data: {json.dumps({'error_type': 'QUOTA_EXHAUSTED', 'text': 'Token quota exceeded on server (429/402). Please use your custom NVIDIA API key.'})}\n\n"
                     return
                 elif response.status_code != 200:
-                    err_text = await response.aread()
-                    yield f"data: {json.dumps({'error': f'NVIDIA API Error ({response.status_code}): {err_text.decode()}'})}\n\n"
+                    err_bytes = await response.aread()
+                    err_msg = err_bytes.decode(errors="replace")
+                    yield f"data: {json.dumps({'error': f'NVIDIA API Error ({response.status_code}): {err_msg}'})}\n\n"
                     return
 
                 async for line in response.aiter_lines():
-                    if line.startswith("data: "):
-                        data_str = line[6:].strip()
+                    trimmed = line.strip()
+                    if not trimmed:
+                        continue
+                    if trimmed.startswith("data:"):
+                        data_str = trimmed[5:].strip()
                         if data_str == "[DONE]":
                             yield "data: [DONE]\n\n"
                             break
                         try:
                             chunk = json.loads(data_str)
-                            delta = chunk.get("choices", [{}])[0].get("delta", {})
+                            choices = chunk.get("choices", [])
+                            if not choices:
+                                continue
+                            delta = choices[0].get("delta", {})
                             
-                            # Instantly capture normal text or reasoning tokens without delay
-                            content = delta.get("content") or delta.get("reasoning_content") or ""
+                            # Only send final response content, filtering out internal reasoning tokens
+                            content = delta.get("content")
                             if content:
                                 yield f"data: {json.dumps({'text': content})}\n\n"
                         except Exception:
                             continue
+        except httpx.ConnectTimeout:
+            yield f"data: {json.dumps({'error': 'Connection to NVIDIA NIM API timed out. Please check your network connection and try again.'})}\n\n"
+        except httpx.ReadTimeout:
+            yield f"data: {json.dumps({'error': 'NVIDIA NIM API read timeout during streaming.'})}\n\n"
         except Exception as e:
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            yield f"data: {json.dumps({'error': f'Streaming Error: {str(e)}'})}\n\n"
         finally:
             await client.aclose()
 
